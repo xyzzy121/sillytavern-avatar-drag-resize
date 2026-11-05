@@ -1,68 +1,45 @@
-// ============================================================================
-//  Observer - watches the DOM for new .zoomed_avatar nodes and restores
-//  any saved transform for them (and stamps the configured z-index).
-// ============================================================================
-
-import { CSS_CLASSES, CSS_VARS } from './shared/constants.js';
-import { getSettings } from './shared/settings.js';
-import { getZIndexValue } from './shared/utils.js';
-import { restoreAvatar } from './shared/avatar.js';
-import { applyCustomImage } from './shared/image.js';
+import { manageAvatar, releaseAvatar, refreshAvatars } from './shared/avatar.js';
+import { applyCustomImage, releaseCustomImage } from './shared/image.js';
 
 let observer = null;
-
-function applyZIndex(el) {
-    const z = getZIndexValue(getSettings().zIndexMode);
-    el.style.setProperty(CSS_VARS.Z_INDEX, String(z), 'important');
-}
-
-function onMount(el) {
-    applyZIndex(el);
-    restoreAvatar(el);
-    applyCustomImage(el);
-
-    requestAnimationFrame(() => {
-        if (document.contains(el)) restoreAvatar(el);
-        requestAnimationFrame(() => {
-            if (document.contains(el)) restoreAvatar(el);
-        });
-    });
-
-    const img = el.querySelector('img');
-    if (img && !img.complete) {
-        img.addEventListener('load', () => {
-            if (document.contains(el)) {
-                restoreAvatar(el);
-                applyCustomImage(el);
-            }
-        }, { once: true });
+const mounted = new Set();
+function sync() {
+    let changed = false;
+    for (const el of [...mounted]) {
+        if (el.isConnected) continue;
+        releaseCustomImage(el);
+        releaseAvatar(el);
+        mounted.delete(el);
+        changed = true;
     }
+    for (const el of document.querySelectorAll('body > .zoomed_avatar')) {
+        if (mounted.has(el)) continue;
+        mounted.add(el);
+        manageAvatar(el);
+        applyCustomImage(el);
+        for (const other of mounted) other.classList.toggle('am-active', other === el);
+        changed = true;
+    }
+    if (mounted.size && !document.querySelector('.am-managed.am-active')) mounted.values().next().value.classList.add('am-active');
+    if (changed) document.dispatchEvent(new Event('am:avatars-changed'));
 }
-
-export function applyZIndexEverywhere() {
-    const z = getZIndexValue(getSettings().zIndexMode);
-    document.documentElement.style.setProperty(CSS_VARS.Z_INDEX, String(z));
-    document.querySelectorAll(`.${CSS_CLASSES.AVATAR}`).forEach(applyZIndex);
-}
-
+export const applyZIndexEverywhere = refreshAvatars;
 export function startObserver() {
     if (observer) return;
-    // Handle any avatars that already exist.
-    document.querySelectorAll(`.${CSS_CLASSES.AVATAR}`).forEach(onMount);
-
-    observer = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-            for (const node of m.addedNodes) {
-                if (!(node instanceof HTMLElement)) continue;
-                if (node.classList?.contains(CSS_CLASSES.AVATAR)) onMount(node);
-                node.querySelectorAll?.(`.${CSS_CLASSES.AVATAR}`).forEach(onMount);
-            }
-        }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer = new MutationObserver(sync);
+    observer.observe(document.body, { childList: true });
+    sync();
+    window.addEventListener('resize', refreshAvatars);
+    window.visualViewport?.addEventListener('resize', refreshAvatars);
+    window.visualViewport?.addEventListener('scroll', refreshAvatars);
 }
-
 export function stopObserver() {
     observer?.disconnect();
     observer = null;
+    window.removeEventListener('resize', refreshAvatars);
+    window.visualViewport?.removeEventListener('resize', refreshAvatars);
+    window.visualViewport?.removeEventListener('scroll', refreshAvatars);
+    for (const el of mounted) { releaseCustomImage(el); releaseAvatar(el); }
+    mounted.clear();
+    document.dispatchEvent(new Event('am:avatars-changed'));
 }

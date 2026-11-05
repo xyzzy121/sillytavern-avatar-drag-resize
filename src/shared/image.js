@@ -1,237 +1,187 @@
 import { toast } from './utils.js';
-import { CSS_CLASSES } from './constants.js';
 import {
-    getCustomImageSource,
-    setCustomImageSource,
-    clearCustomImageSource,
-    getSettings,
+    getAvatarKey, getCustomImageSource, setCustomImageSource,
+    clearCustomImageSource, getSettings,
 } from './settings.js';
-import {
-    resolveSourceToUrl,
-    sourceFromLocalFile,
-} from './avatar-source.js';
+import { resolveSourceToUrl, sourceFromLocalFile, validateImageDataUrl } from './avatar-source.js';
 
-const ORIGINAL_SRC_KEY = 'amOriginalSrc';
-const IMAGE_OBSERVER_KEY = 'amImageObserver';
-const IMAGE_RESETTING_KEY = 'amImageResetting';
+// One lifecycle record per mounted avatar. Nothing is cached by a different
+// identity scheme, and all observers, decoders and file pickers are disposable.
+const records = new Map();
+const operations = new Map();
 
-const originalSourcesCache = new Map();
-
-function getAvatarImageElements(el) {
-    if (!el) return [];
-    const imgs = Array.from(el.querySelectorAll('img'));
-    const wrappers = Array.from(el.querySelectorAll('.zoomed_avatar_img'));
-    return [...imgs, ...wrappers].filter(Boolean);
+function isManaged(el) {
+    return Boolean(el?.isConnected && el.classList.contains('am-managed') && getSettings().enabled);
 }
 
-function getImageSourceValue(imageEl) {
-    if (!imageEl) return null;
-    if (imageEl.tagName === 'IMG') return imageEl.src || null;
-    if (imageEl.hasAttribute('src')) return imageEl.getAttribute('src');
-    const bg = imageEl.style.backgroundImage || getComputedStyle(imageEl).backgroundImage;
-    return (bg && bg !== 'none') ? bg.slice(5, -2) : null;
+function notifyImageChanged(el) {
+    if (isManaged(el)) document.dispatchEvent(new CustomEvent('am:image-changed', { detail: { avatar: el } }));
 }
 
-function setImageSourceValue(imageEl, url) {
-    if (!imageEl) return;
-    if (imageEl.tagName === 'IMG') {
-        imageEl.src = url;
-        return;
-    }
-    if (imageEl.hasAttribute('src')) {
-        imageEl.setAttribute('src', url);
-        return;
-    }
-    imageEl.style.backgroundImage = `url("${url}")`;
+function inform(message) {
+    if (getSettings().showToasts) toast(message);
 }
 
-function getCharacterKey(el) {
-    return el ? (el.getAttribute('data-character-key') || el.id || 'default_avatar') : 'default_avatar';
+function setAttributeOrRemove(element, name, value) {
+    if (value === null) element.removeAttribute(name);
+    else element.setAttribute(name, value);
 }
 
-function getOriginalSource(el) {
-    const cacheKey = getCharacterKey(el);
-    if (originalSourcesCache.has(cacheKey)) {
-        return originalSourcesCache.get(cacheKey);
-    }
-    return (el && el.dataset && el.dataset[ORIGINAL_SRC_KEY]) ? el.dataset[ORIGINAL_SRC_KEY] : null;
+function ensureRecord(el) {
+    let record = records.get(el);
+    if (record) return record;
+    record = {
+        key: getAvatarKey(el), images: new Map(), controller: new AbortController(),
+        validatedUrl: null, pendingUrl: null, rejectedUrl: null, decodeController: null,
+        observer: null,
+    };
+    record.observer = new MutationObserver(() => {
+        if (!isManaged(el)) { releaseCustomImage(el); return; }
+        applyCustomImage(el);
+    });
+    record.observer.observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-izoomify-url'] });
+    records.set(el, record);
+    return record;
 }
 
-function setOriginalSource(el, value) {
-    if (!el || !value) return;
-    el.dataset[ORIGINAL_SRC_KEY] = value;
-    const cacheKey = getCharacterKey(el);
-    if (!originalSourcesCache.has(cacheKey)) {
-        originalSourcesCache.set(cacheKey, value);
-    }
-}
-
-function forceLayoutRecalculation(imageEl) {
-    if (!imageEl) return;
-    window.dispatchEvent(new Event('resize'));
-    if (imageEl.tagName === 'IMG') {
-        const width = imageEl.clientWidth;
-        imageEl.style.display = 'none';
-        imageEl.offsetHeight;
-        imageEl.style.display = 'block';
-    }
-}
-
-function rememberOriginal(imageEl, el, customUrl) {
-    if (!imageEl || !el) return;
-
-    const existingOriginal = getOriginalSource(el) || imageEl.dataset[ORIGINAL_SRC_KEY];
-    if (existingOriginal) {
-        if (!imageEl.dataset[ORIGINAL_SRC_KEY]) {
-            imageEl.dataset[ORIGINAL_SRC_KEY] = existingOriginal;
+function applyValidatedSource(el, record, url) {
+    if (!isManaged(el) || records.get(el) !== record) return;
+    let changed = false;
+    for (const image of el.querySelectorAll('img')) {
+        let original = record.images.get(image);
+        const currentSrc = image.getAttribute('src');
+        const currentZoom = image.getAttribute('data-izoomify-url');
+        if (!original) {
+            original = { src: currentSrc, zoom: currentZoom, appliedSrc: null, appliedZoom: null };
+            record.images.set(image, original);
+            image.addEventListener('load', () => notifyImageChanged(el), { signal: record.controller.signal });
+        } else {
+            // A native source change while an override is active becomes the
+            // source to restore. Do not mistake our prior override for native.
+            if (currentSrc !== original.appliedSrc) original.src = currentSrc;
+            if (currentZoom !== original.appliedZoom) original.zoom = currentZoom;
         }
-        return;
+        original.appliedSrc = url;
+        original.appliedZoom = url;
+        if (currentSrc !== url) { image.setAttribute('src', url); changed = true; }
+        if (currentZoom !== url) image.setAttribute('data-izoomify-url', url);
     }
-
-    const current = getImageSourceValue(imageEl);
-    if (!current || current === customUrl) return;
-
-    setOriginalSource(el, current);
-    imageEl.dataset[ORIGINAL_SRC_KEY] = current;
-}
-
-function informIfEnabled(message) {
-    if (getSettings().showToasts !== false) toast(message);
+    if (changed) notifyImageChanged(el);
 }
 
 export function applyCustomImage(el) {
-    if (!el) return;
-    const source = getCustomImageSource(el);
-    if (!source) return;
-    const url = resolveSourceToUrl(source);
-    if (!url) return;
-
-    const imageEls = getAvatarImageElements(el);
-    if (imageEls.length === 0) return;
-
-    imageEls.forEach((imageEl) => {
-        rememberOriginal(imageEl, el, url);
-        const current = getImageSourceValue(imageEl);
-        if (current !== url) {
-            setImageSourceValue(imageEl, url);
-            if (imageEl.tagName === 'IMG') {
-                imageEl.addEventListener('load', () => forceLayoutRecalculation(imageEl), { once: true });
-            }
-        }
-    });
-
-    if (!el.dataset[IMAGE_OBSERVER_KEY]) {
-        const observer = new MutationObserver(() => {
-            requestAnimationFrame(() => {
-                if (el.dataset[IMAGE_RESETTING_KEY]) return;
-
-                const source = getCustomImageSource(el);
-                if (!source) return;
-                const currentUrl = resolveSourceToUrl(source);
-                if (!currentUrl) return;
-                getAvatarImageElements(el).forEach((latestEl) => {
-                    const latest = getImageSourceValue(latestEl);
-                    if (latest !== currentUrl) {
-                        rememberOriginal(latestEl, el);
-                        setImageSourceValue(latestEl, currentUrl);
-                        if (latestEl.tagName === 'IMG') {
-                            latestEl.addEventListener('load', () => forceLayoutRecalculation(latestEl), { once: true });
-                        }
-                    }
-                });
-            });
-        });
-        observer.observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'style'] });
-        el.dataset[IMAGE_OBSERVER_KEY] = '1';
+    if (!isManaged(el)) return;
+    const url = resolveSourceToUrl(getCustomImageSource(el));
+    if (!url) {
+        if (records.has(el)) releaseCustomImage(el);
+        return;
     }
+    const record = ensureRecord(el);
+    if (record.validatedUrl === url) { applyValidatedSource(el, record, url); return; }
+    if (record.pendingUrl === url || record.rejectedUrl === url) return;
+    record.decodeController?.abort();
+    const decoder = new AbortController();
+    record.decodeController = decoder;
+    record.pendingUrl = url;
+    validateImageDataUrl(url, { signal: decoder.signal }).then(() => {
+        if (records.get(el) !== record || decoder.signal.aborted || !isManaged(el)) return;
+        record.pendingUrl = null;
+        record.validatedUrl = url;
+        if (resolveSourceToUrl(getCustomImageSource(el)) === url) applyValidatedSource(el, record, url);
+    }).catch(error => {
+        if (records.get(el) !== record || decoder.signal.aborted) return;
+        record.pendingUrl = null;
+        record.rejectedUrl = url;
+        // Invalid imported settings must never replace the working native image.
+        if (error.name !== 'AbortError') console.warn('[AvatarManip] Ignored an invalid saved image');
+    });
+}
+
+export function releaseCustomImage(el) {
+    operations.get(el)?.abort();
+    operations.delete(el);
+    const record = records.get(el);
+    if (!record) return;
+    records.delete(el);
+    record.observer.disconnect();
+    record.decodeController?.abort();
+    record.controller.abort();
+    for (const [image, original] of record.images) {
+        // Restore only attributes we still own; preserve subsequent native edits.
+        if (image.getAttribute('src') === original.appliedSrc) setAttributeOrRemove(image, 'src', original.src);
+        if (image.getAttribute('data-izoomify-url') === original.appliedZoom) setAttributeOrRemove(image, 'data-izoomify-url', original.zoom);
+    }
+    notifyImageChanged(el);
+}
+
+export function cleanupImages() {
+    for (const controller of operations.values()) controller.abort();
+    operations.clear();
+    for (const el of [...records.keys()]) releaseCustomImage(el);
 }
 
 export function resetCustomImage(el) {
-    if (!el) return;
-
-    el.dataset[IMAGE_RESETTING_KEY] = '1';
-
-    const originalSource = getOriginalSource(el);
-    if (originalSource) {
-        getAvatarImageElements(el).forEach((imageEl) => {
-            setImageSourceValue(imageEl, originalSource);
-            if (imageEl.tagName === 'IMG') {
-                imageEl.addEventListener('load', () => forceLayoutRecalculation(imageEl), { once: true });
-            }
-        });
-    }
-
+    if (!isManaged(el)) return;
+    const key = getAvatarKey(el);
     clearCustomImageSource(el);
-
-    document.querySelectorAll(`.${CSS_CLASSES.AVATAR}`).forEach((avatarEl) => {
-        if (avatarEl !== el) {
-            const extraOriginal = getOriginalSource(avatarEl);
-            if (extraOriginal) {
-                getAvatarImageElements(avatarEl).forEach((img) => {
-                    setImageSourceValue(img, extraOriginal);
-                    if (img.tagName === 'IMG') {
-                        img.addEventListener('load', () => forceLayoutRecalculation(img), { once: true });
-                    }
-                });
-            }
-        }
-    });
-
-    setTimeout(() => {
-        delete el.dataset[IMAGE_RESETTING_KEY];
-    }, 200);
-
-    informIfEnabled('Avatar image reset');
+    releaseCustomImage(el);
+    for (const [other, record] of [...records]) {
+        if (record.key === key) releaseCustomImage(other);
+    }
+    inform('Avatar image reset');
 }
 
 export async function pickAndApplyLocalImage(el) {
-    if (!el) {
-        toast('Open an avatar first');
-        return;
-    }
-
-    const file = await pickImageFile();
-    if (!file) return;
-
+    if (!isManaged(el)) { toast('Open an avatar first'); return; }
+    operations.get(el)?.abort();
+    const operation = new AbortController();
+    operations.set(el, operation);
     try {
-        const source = await sourceFromLocalFile(file);
+        const file = await pickImageFile(operation.signal);
+        if (!file || operation.signal.aborted || !isManaged(el)) return;
+        const source = await sourceFromLocalFile(file, { signal: operation.signal });
+        if (operation.signal.aborted || !isManaged(el)) return;
         setCustomImageSource(el, source);
-        applyCustomImage(el);
-        requestAnimationFrame(() => applyCustomImage(el));
-        setTimeout(() => applyCustomImage(el), 100);
-        setTimeout(() => applyCustomImage(el), 300);
-        document.querySelectorAll(`.${CSS_CLASSES.AVATAR}`).forEach(applyCustomImage);
-        informIfEnabled('Avatar image updated');
-    } catch (err) {
-        if (err && err.code === 'IMAGE_TOO_LARGE') {
-            toast('Image is too large (max 6 MB)');
-        } else {
-            toast('Could not read image');
+        const record = ensureRecord(el);
+        record.decodeController?.abort();
+        record.pendingUrl = null;
+        record.validatedUrl = source.data;
+        applyValidatedSource(el, record, source.data);
+        // Multiple mounted views of the same identity share the same override.
+        for (const other of document.querySelectorAll('.zoomed_avatar.am-managed')) {
+            if (other !== el && getAvatarKey(other) === record.key) applyCustomImage(other);
         }
+        inform('Avatar image updated');
+    } catch (error) {
+        if (error.name !== 'AbortError' && !operation.signal.aborted && isManaged(el)) {
+            toast(error.code === 'IMAGE_TOO_LARGE' ? 'Image is too large (max 6 MB)' : 'Could not read a valid image');
+        }
+    } finally {
+        if (operations.get(el) === operation) operations.delete(el);
     }
 }
 
-function pickImageFile() {
-    return new Promise((resolve) => {
+function pickImageFile(signal) {
+    return new Promise(resolve => {
+        if (signal.aborted) return resolve(null);
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = 'image/*';
-        input.style.position = 'fixed';
-        input.style.top = '-10000px';
-        input.style.left = '-10000px';
+        input.className = 'am-image-picker';
+        input.hidden = true;
         document.body.appendChild(input);
-
         let settled = false;
-        const done = (value) => {
+        const done = (file) => {
             if (settled) return;
             settled = true;
+            signal.removeEventListener('abort', cancel);
             input.remove();
-            resolve(value);
+            resolve(file);
         };
-
-        input.addEventListener('change', () => done(input.files ? input.files[0] : null), { once: true });
-        input.addEventListener('cancel', () => done(null), { once: true });
-
+        const cancel = () => done(null);
+        signal.addEventListener('abort', cancel, { once: true });
+        input.addEventListener('change', () => done(input.files?.[0] ?? null), { once: true });
+        input.addEventListener('cancel', cancel, { once: true });
         input.click();
     });
 }

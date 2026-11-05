@@ -27,12 +27,14 @@ export const touchState = {
     touchMoved: false,     // Set true when a drag/rotate move happens; cancels long-press
     lastTapTime: 0,
     lastTapTarget: null,
+    lastTapPoint: null,
     longPressTimer: null,
     // Pinch reference frame
     pinchDistance0: 0,
     pinchScale0: 1,
     pinchAngle0: 0,
     pinchRotation0: 0,
+    pinchX0: 0, pinchY0: 0, pinchCenterX: 0, pinchCenterY: 0,
 };
 
 export const intervals = {
@@ -41,6 +43,7 @@ export const intervals = {
 };
 
 export function resetInteractionState() {
+    if (touchState.longPressTimer !== null) clearTimeout(touchState.longPressTimer);
     if (intervals.animation) cancelAnimationFrame(intervals.animation);
     intervals.animation = null;
     for (const k of Object.keys(intervals.mobile)) {
@@ -58,9 +61,10 @@ export function resetInteractionState() {
     touchState.touches.clear();
     Object.assign(touchState, {
         isPinching: false, touchMoved: false,
-        lastTapTime: 0, lastTapTarget: null,
+        lastTapTime: 0, lastTapTarget: null, lastTapPoint: null,
         longPressTimer: null,
         pinchDistance0: 0, pinchScale0: 1,
         pinchAngle0: 0, pinchRotation0: 0,
+        pinchX0: 0, pinchY0: 0, pinchCenterX: 0, pinchCenterY: 0,
     });
 }

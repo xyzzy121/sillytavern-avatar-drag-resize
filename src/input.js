@@ -1,12 +1,5 @@
-// ============================================================================
-//  Input - unified pointer / wheel / dblclick handler.
-//
-//  Uses Pointer Events for a single code path that supports mouse, pen and
-//  touch. For two-finger pinch we fall back to the raw touch list (kept in
-//  `touchState.touches`) because Pointer Events fire once per pointer.
-// ============================================================================
-
-import { dragState, touchState, intervals } from './shared/state.js';
+// A gesture owns one avatar and at most two pointers until completion.
+import { dragState, touchState } from './shared/state.js';
 import { CSS_CLASSES } from './shared/constants.js';
 import { getSettings } from './shared/settings.js';
 import { getAvatar, isExcludedTarget } from './shared/utils.js';
@@ -15,194 +8,205 @@ import { startDrag, updateDrag, endDrag } from './gestures/drag.js';
 import { shouldRotate, startRotate, updateRotate, endRotate } from './gestures/rotate.js';
 import { wheelZoom } from './gestures/zoom.js';
 import { startPinch, updatePinch, endPinch } from './gestures/pinch.js';
-import { handleDoubleTap, startLongPress, clearLongPress, markTouchMoved } from './gestures/tap.js';
+import { handleDoubleTap, startLongPress, clearLongPress, markTouchMoved, clearTapHistory, TAP_SLOP } from './gestures/tap.js';
 
-// -------------------- helpers --------------------
+const pointers = new Map();
+let registered = false;
+let suppressTouchDoubleClickUntil = 0;
+
+function point(event) {
+    return { pointerId: event.pointerId, pointerType: event.pointerType, clientX: event.clientX, clientY: event.clientY };
+}
 
 function markActive(target) {
-    document.querySelectorAll(`.${CSS_CLASSES.AVATAR}`).forEach(el => el.classList.remove(CSS_CLASSES.ACTIVE));
+    document.querySelectorAll(`.${CSS_CLASSES.AVATAR}.${CSS_CLASSES.ACTIVE}`)
+        .forEach(el => el.classList.remove(CSS_CLASSES.ACTIVE));
     target.classList.add(CSS_CLASSES.ACTIVE);
+    document.dispatchEvent(new Event('am:avatars-changed'));
 }
 
-function startDragOrRotate(e, target) {
-    if (shouldRotate(e, target)) startRotate(e, target);
-    else startDrag(e, target);
+function endMode() {
+    const target = dragState.target;
+    if (dragState.mode === 'drag') endDrag(target);
+    if (dragState.mode === 'rotate') endRotate(target);
+    if (dragState.mode === 'pinch') endPinch(target);
+    dragState.mode = null;
 }
 
-// -------------------- pointerdown --------------------
-
-function onPointerDown(e) {
-    if (!getSettings().enabled) return;
-    const target = getAvatar(e.target);
-    if (!target || isExcludedTarget(e.target)) return;
-
-    markActive(target);
-    dragState.target = target;
-    readAvatar(target);
-
-    if (e.pointerType === 'touch') {
-        touchState.touches.set(e.pointerId, e);
-        const size = touchState.touches.size;
-
-        // Two-finger gesture -> pinch
-        if (size === 2) {
-            e.preventDefault();
-            e.stopPropagation();
-            clearLongPress();
-            startPinch(target, [...touchState.touches.values()]);
-            return;
-        }
-
-        // Single-finger -> long-press timer, double-tap check, then drag/rotate.
-        if (size === 1) {
-            e.preventDefault();
-            startLongPress(target);
-            if (handleDoubleTap(e, target)) {
-                dragState.target = null;
-                dragState.mode = null;
-                return;
-            }
-            startDragOrRotate(e, target);
-        }
-    } else {
-        e.preventDefault();
-        startDragOrRotate(e, target);
-        if (dragState.mode) {
-            try { target.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-        }
-    }
+function release(target, id) {
+    try { if (target?.hasPointerCapture(id)) target.releasePointerCapture(id); } catch { /* Removed node. */ }
 }
-
-// -------------------- pointermove --------------------
-
-function onPointerMove(e) {
-    if (!dragState.mode || !dragState.target) return;
-
-    if (dragState.mode === 'drag' || dragState.mode === 'rotate') {
-        markTouchMoved();
-        clearLongPress();
-    }
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    if (e.pointerType === 'touch') touchState.touches.set(e.pointerId, e);
-
-    if (intervals.animation) cancelAnimationFrame(intervals.animation);
-    intervals.animation = requestAnimationFrame(() => {
-        if (!dragState.target) { intervals.animation = null; return; }
-        if (dragState.mode === 'drag') updateDrag(e);
-        else if (dragState.mode === 'rotate') updateRotate(e, dragState.target);
-        else if (dragState.mode === 'pinch') updatePinch([...touchState.touches.values()]);
-        writeAvatar(dragState.target);
-        intervals.animation = null;
-    });
-}
-
-// -------------------- pointerup / pointercancel --------------------
 
 function finishGesture() {
-    if (dragState.mode === 'drag') endDrag(dragState.target);
-    else if (dragState.mode === 'rotate') endRotate(dragState.target);
-    else if (dragState.mode === 'pinch') endPinch(dragState.target);
-    dragState.mode = null;
+    clearLongPress();
+    const target = dragState.target;
+    const ids = [...pointers.keys()];
+    endMode();
+    pointers.clear();
+    touchState.touches.clear();
+    touchState.isPinching = false;
+    touchState.touchMoved = false;
     dragState.target = null;
+    ids.forEach(id => release(target, id));
 }
 
-function onPointerUp(e) {
+function targetIsLive() {
+    return dragState.target?.isConnected && dragState.target.classList.contains('am-managed') && getSettings().enabled;
+}
+
+function beginSingle(record, target) {
+    readAvatar(target);
+    if (record.current.pointerType !== 'touch' && shouldRotate(record.current, target)) startRotate(record.current, target);
+    else startDrag(record.current, target);
+}
+
+function onPointerDown(event) {
+    if (!getSettings().enabled || (event.pointerType !== 'touch' && event.button !== 0)) return;
+    const target = getAvatar(event.target);
+    if (!target || !target.classList.contains('am-managed') || isExcludedTarget(event.target)) return;
+    if (dragState.target && !targetIsLive()) finishGesture();
+    if (pointers.size && (dragState.target !== target || event.pointerType !== 'touch' ||
+        [...pointers.values()].some(p => p.current.pointerType !== 'touch') || pointers.size >= 2)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const current = point(event);
+    const record = { current, initial: current, startedAt: Date.now(), moved: false, multiple: false };
+    pointers.set(event.pointerId, record);
+    if (event.pointerType === 'touch') touchState.touches.set(event.pointerId, current);
+    dragState.target = target;
+    markActive(target);
+    try { target.setPointerCapture(event.pointerId); } catch { /* Synthetic events or an older browser. */ }
+
+    if (pointers.size === 2) {
+        clearLongPress();
+        clearTapHistory();
+        pointers.forEach(p => { p.multiple = true; });
+        endMode();
+        startPinch(target, [...pointers.values()].map(p => p.current));
+    } else {
+        beginSingle(record, target);
+        if (event.pointerType === 'touch') {
+            startLongPress(target, () => {
+                finishGesture();
+                clearTapHistory();
+                resetAvatar(target);
+                suppressTouchDoubleClickUntil = Date.now() + 500;
+            });
+        }
+    }
+}
+
+function updatePointer(event) {
+    const record = pointers.get(event.pointerId);
+    if (!record) return;
+    record.current = point(event);
+    if (event.pointerType === 'touch') touchState.touches.set(event.pointerId, record.current);
+    if (Math.hypot(event.clientX - record.initial.clientX, event.clientY - record.initial.clientY) > TAP_SLOP) {
+        record.moved = true;
+        markTouchMoved();
+        clearLongPress();
+        clearTapHistory();
+    }
+    // Keep small finger jitter from moving the image or cancelling a long press.
+    if (!record.moved && dragState.mode !== 'pinch' && event.pointerType === 'touch') return;
+    readAvatar(dragState.target);
+    if (dragState.mode === 'drag') updateDrag(event);
+    else if (dragState.mode === 'rotate') updateRotate(event, dragState.target);
+    else if (dragState.mode === 'pinch') updatePinch([...pointers.values()].map(p => p.current));
+    writeAvatar(dragState.target);
+}
+
+function onPointerMove(event) {
+    if (!pointers.has(event.pointerId)) return;
+    if (!targetIsLive()) { finishGesture(); return; }
+    event.preventDefault();
+    event.stopPropagation();
+    updatePointer(event);
+}
+
+function onPointerUp(event) {
+    const record = pointers.get(event.pointerId);
+    if (!record) return;
+    if (!targetIsLive()) { finishGesture(); return; }
+    event.preventDefault();
+    updatePointer(event);
+    const target = dragState.target;
     clearLongPress();
-
-    if (e.pointerType === 'touch') {
-        touchState.touches.delete(e.pointerId);
-        const size = touchState.touches.size;
-
-        if (touchState.isPinching && size < 2) {
-            endPinch(dragState.target);
-            dragState.mode = null;
-            dragState.target = null;
-            return;
-        }
-        if (size === 0) {
-            finishGesture();
-            touchState.touchMoved = false;
-        }
+    pointers.delete(event.pointerId);
+    touchState.touches.delete(event.pointerId);
+    release(target, event.pointerId);
+    if (pointers.size) {
+        endMode();
+        const remaining = [...pointers.values()][0];
+        remaining.moved = true;
+        // Resume at the current finger and current transform, with no jump.
+        readAvatar(target);
+        startDrag(remaining.current, target);
         return;
     }
-
-    if (!dragState.mode) return;
-    if (intervals.animation) { cancelAnimationFrame(intervals.animation); intervals.animation = null; }
-    if (dragState.target) {
-        try { dragState.target.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
-    }
     finishGesture();
+    if (event.pointerType === 'touch') {
+        suppressTouchDoubleClickUntil = Date.now() + 500;
+        if (!record.moved && !record.multiple && Date.now() - record.startedAt < getSettings().longPressDuration) {
+            handleDoubleTap(event, target);
+        } else clearTapHistory();
+    }
 }
 
-function onPointerCancel(e) {
-    clearLongPress();
-    if (e.pointerType === 'touch') {
-        touchState.touches.delete(e.pointerId);
-        if (touchState.touches.size === 0) {
-            finishGesture();
-            touchState.touchMoved = false;
-        }
-        return;
-    }
-    if (dragState.target) {
-        try { dragState.target.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
-    }
+function onPointerCancel(event) {
+    if (pointers.has(event.pointerId)) { finishGesture(); clearTapHistory(); }
+}
+
+function onLostCapture(event) {
+    // Explicit release after pointerup has already removed that pointer.
+    if (pointers.has(event.pointerId)) { finishGesture(); clearTapHistory(); }
+}
+
+function onBlur() { finishGesture(); clearTapHistory(); }
+function onAvatarsChanged() { if (dragState.target && !targetIsLive()) onBlur(); }
+
+function onWheel(event) {
+    if (!getSettings().enabled) return;
+    const target = getAvatar(event.target);
+    if (!target || !target.classList.contains('am-managed') || isExcludedTarget(event.target)) return;
+    event.preventDefault();
+    if (pointers.size) finishGesture();
+    markActive(target);
+    wheelZoom(target, event.deltaY);
+}
+
+function onDoubleClick(event) {
+    if (!getSettings().enabled || Date.now() < suppressTouchDoubleClickUntil) return;
+    const target = getAvatar(event.target);
+    if (!target || !target.classList.contains('am-managed') || isExcludedTarget(event.target)) return;
+    event.preventDefault();
     finishGesture();
-}
-
-// -------------------- wheel + dblclick --------------------
-
-// Only preventDefault when the wheel is actually over an avatar - otherwise
-// normal page scrolling must keep working.
-function onWheel(e) {
-    if (!getSettings().enabled) return;
-    const target = getAvatar(e.target);
-    if (!target || isExcludedTarget(e.target)) return;
-    e.preventDefault();
-    wheelZoom(target, e.deltaY);
-}
-
-function onDoubleClick(e) {
-    if (!getSettings().enabled) return;
-    const target = getAvatar(e.target);
-    if (!target || isExcludedTarget(e.target)) return;
-    e.preventDefault();
+    markActive(target);
     resetAvatar(target);
 }
 
-// Clicking outside any avatar clears the "active" marker so mobile controls
-// won't accidentally act on the last-touched avatar after another element
-// was tapped.
-function onTapOutside(e) {
-    if (e.target.closest(`.${CSS_CLASSES.MOBILE_CONTROLS}, .${CSS_CLASSES.SETTINGS_CONTAINER}`)) return;
-    if (!e.target.closest(`.${CSS_CLASSES.AVATAR}`)) {
-        document.querySelectorAll(`.${CSS_CLASSES.AVATAR}.${CSS_CLASSES.ACTIVE}`)
-            .forEach(el => el.classList.remove(CSS_CLASSES.ACTIVE));
-    }
-}
-
-// -------------------- registration --------------------
-
-// Wheel needs `passive: false` so we can preventDefault when appropriate.
 const listeners = [
-    ['pointerdown', onPointerDown, undefined],
-    ['pointermove', onPointerMove, undefined],
-    ['pointerup', onPointerUp, undefined],
-    ['pointercancel', onPointerCancel, undefined],
+    ['pointerdown', onPointerDown, { passive: false }],
+    ['pointermove', onPointerMove, { passive: false }],
+    ['pointerup', onPointerUp, { passive: false }],
+    ['pointercancel', onPointerCancel],
+    ['lostpointercapture', onLostCapture],
     ['wheel', onWheel, { passive: false }],
-    ['dblclick', onDoubleClick, undefined],
-    ['touchstart', onTapOutside, { passive: true }],
-    ['mousedown', onTapOutside, undefined],
+    ['dblclick', onDoubleClick],
+    ['am:avatars-changed', onAvatarsChanged],
+    ['am:before-action', onBlur],
 ];
 
 export function registerInputHandlers() {
-    listeners.forEach(([name, fn, opts]) => document.addEventListener(name, fn, opts));
+    if (registered) return;
+    registered = true;
+    listeners.forEach(([name, handler, options]) => document.addEventListener(name, handler, options));
+    window.addEventListener('blur', onBlur);
 }
 
 export function unregisterInputHandlers() {
-    listeners.forEach(([name, fn, opts]) => document.removeEventListener(name, fn, opts));
-    clearLongPress();
+    listeners.forEach(([name, handler, options]) => document.removeEventListener(name, handler, options));
+    window.removeEventListener('blur', onBlur);
+    onBlur();
+    registered = false;
 }

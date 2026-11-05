@@ -1,187 +1,73 @@
-// ============================================================================
-//  UI - On-screen mobile controls (zoom/rotate/move/reset).
-//  Uses native listeners on the container - jQuery delegation with mixed
-//  touchstart/pointerdown can miss taps on some Android browsers.
-// ============================================================================
-
+// A toolbar outside the transformed image stays usable at every zoom level.
 import { CSS_CLASSES } from '../shared/constants.js';
-import { intervals, dragState, rotationState } from '../shared/state.js';
 import { getSettings } from '../shared/settings.js';
-import { getActiveAvatar, isMobileDevice } from '../shared/utils.js';
-import { readAvatar, writeAvatar, resetAvatar } from '../shared/avatar.js';
-import { stepZoom } from '../gestures/zoom.js';
-import { pickAndApplyLocalImage } from '../shared/image.js';
+import { getActiveAvatar } from '../shared/utils.js';
+import { actionButton, bindActions } from './actions.js';
 
-const REPEAT_MS = 90;
-const ONE_SHOT_KEYS = new Set(['reset', 'image']);
-
-const BUTTONS = [
-    { key: 'zoom-in',      icon: 'fa-magnifying-glass-plus',  label: 'Zoom In' },
-    { key: 'zoom-out',     icon: 'fa-magnifying-glass-minus', label: 'Zoom Out' },
-    { key: 'rotate-left',  icon: 'fa-rotate-left',            label: 'Rotate Left' },
-    { key: 'rotate-right', icon: 'fa-rotate-right',           label: 'Rotate Right' },
-    { key: 'move-up',      icon: 'fa-arrow-up',               label: 'Up',    span: 2 },
-    { key: 'move-left',    icon: 'fa-arrow-left',             label: 'Left' },
-    { key: 'move-right',   icon: 'fa-arrow-right',            label: 'Right' },
-    { key: 'move-down',    icon: 'fa-arrow-down',             label: 'Down', span: 2 },
-    { key: 'image',        icon: 'fa-image',                  label: 'Image' },
-    { key: 'reset',        icon: 'fa-undo',                   label: 'Reset', span: 2, danger: true },
-];
-
-function buttonHTML(b) {
-    const bg = b.danger ? '#ff6b6b' : 'var(--accent-color, #4a90e2)';
-    const span = b.span ? `grid-column:span ${b.span};` : '';
-    return `<button type="button" data-am-btn="${b.key}" class="mobile-control-btn"
-        style="padding:14px;border:none;border-radius:8px;background:${bg};color:white;
-               font-size:15px;cursor:pointer;touch-action:manipulation;${span}">
-        <i class="fa-solid ${b.icon}"></i> ${b.label}
-    </button>`;
-}
-
-function panelHTML() {
-    return `
-    <div id="${CSS_CLASSES.MOBILE_CONTROLS}" class="mobile-controls-drawer"
-         style="margin-top:10px;user-select:none;-webkit-user-select:none;">
-        <div data-am-toggle style="cursor:pointer;display:flex;justify-content:space-between;
-             align-items:center;padding:10px;background:var(--secondary-color,#333);border-radius:8px;">
-            <b><i class="fa-solid fa-mobile-screen-button"></i> Mobile Controls</b>
-            <div data-am-chevron class="fa-solid fa-chevron-down"
-                 style="font-size:1.2rem;transition:transform 0.15s ease;"></div>
-        </div>
-        <div data-am-content style="display:none;padding:10px;background:var(--secondary-color,#333);
-             border-radius:8px;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:6px;">
-            ${BUTTONS.map(buttonHTML).join('')}
-        </div>
-    </div>`;
-}
-
-// -------------------- button actions --------------------
-
-function moveStep()   { return getSettings().mobileMoveStep   || 20; }
-function rotateStep() { return getSettings().mobileRotateStep || 10; }
-
-function performAction(key, target) {
-    if (!target) return;
-    readAvatar(target);
-    switch (key) {
-        case 'zoom-in':      stepZoom(target, +1); return;
-        case 'zoom-out':     stepZoom(target, -1); return;
-        case 'rotate-left':  rotationState.rotation -= rotateStep(); break;
-        case 'rotate-right': rotationState.rotation += rotateStep(); break;
-        case 'move-up':      dragState.y -= moveStep(); break;
-        case 'move-down':    dragState.y += moveStep(); break;
-        case 'move-left':    dragState.x -= moveStep(); break;
-        case 'move-right':   dragState.x += moveStep(); break;
-        default: return;
-    }
-    writeAvatar(target);
-}
-
-function performOneShot(key, target) {
-    if (!target) return;
-    switch (key) {
-        case 'reset':
-            resetAvatar(target);
-            break;
-        case 'image':
-            pickAndApplyLocalImage(target);
-            break;
-        default:
-            break;
-    }
-}
-
-// -------------------- interval control --------------------
-
-function stopRepeat(key) {
-    if (intervals.mobile[key]) {
-        clearInterval(intervals.mobile[key]);
-        delete intervals.mobile[key];
-    }
-}
-
-function stopAllRepeats() {
-    Object.keys(intervals.mobile).forEach(stopRepeat);
-}
-
-// -------------------- binding --------------------
-
-function bind(container) {
-    const toggle = container.querySelector('[data-am-toggle]');
-    const content = container.querySelector('[data-am-content]');
-    const chevron = container.querySelector('[data-am-chevron]');
-
-    toggle.addEventListener('click', () => {
-        const open = content.style.display !== 'none';
-        content.style.display = open ? 'none' : 'grid';
-        chevron.style.transform = open ? 'rotate(0deg)' : 'rotate(180deg)';
-    });
-
-    // A single delegated handler for all buttons. `touchstart` gives us the
-    // fastest response on mobile; `pointerdown` covers stylus & desktop test.
-    const start = (e) => {
-        const btn = e.target.closest('button[data-am-btn]');
-        if (!btn) return;
-        e.preventDefault();
-        e.stopPropagation();
-
-        const key = btn.dataset.amBtn;
-        const target = getActiveAvatar();
-        if (ONE_SHOT_KEYS.has(key)) {
-            performOneShot(key, target);
-            return;
-        }
-
-        performAction(key, target);
-        stopRepeat(key);
-        intervals.mobile[key] = setInterval(() => performAction(key, getActiveAvatar()), REPEAT_MS);
-    };
-
-    const stop = (e) => {
-        const btn = e.target.closest('button[data-am-btn]');
-        if (btn) stopRepeat(btn.dataset.amBtn);
-        else stopAllRepeats();
-    };
-
-    content.addEventListener('touchstart', start, { passive: false });
-    content.addEventListener('pointerdown', start);
-    content.addEventListener('touchend', stop);
-    content.addEventListener('touchcancel', stop);
-    content.addEventListener('pointerup', stop);
-    content.addEventListener('pointercancel', stop);
-    content.addEventListener('pointerleave', stop);
-    window.addEventListener('blur', stopAllRepeats);
-
-    // Swallow the synthetic click that follows touchstart so the button
-    // action does not fire twice.
-    content.addEventListener('click', (e) => {
-        if (e.target.closest('button[data-am-btn]')) {
-            e.preventDefault();
-            e.stopPropagation();
-        }
-    });
-}
-
-// -------------------- lifecycle --------------------
-
-function whenPanelReady(fn, attempts = 60) {
-    const panel = document.getElementById('extensions_settings');
-    if (panel) { fn(panel); return; }
-    if (attempts <= 0) return;
-    setTimeout(() => whenPanelReady(fn, attempts - 1), 500);
-}
+let dispose = null;
 
 export function createMobileControls() {
-    if (!isMobileDevice()) return;
-    whenPanelReady((panel) => {
-        document.getElementById(CSS_CLASSES.MOBILE_CONTROLS)?.remove();
-        panel.insertAdjacentHTML('beforeend', panelHTML());
-        const container = document.getElementById(CSS_CLASSES.MOBILE_CONTROLS);
-        if (container) bind(container);
-    });
+    removeMobileControls();
+    const toolbar = document.createElement('div');
+    toolbar.id = CSS_CLASSES.MOBILE_CONTROLS;
+    toolbar.className = 'am-toolbar';
+    toolbar.setAttribute('role', 'toolbar');
+    toolbar.setAttribute('aria-label', 'Avatar image controls');
+    toolbar.hidden = true;
+    toolbar.innerHTML = ['zoom-out', 'zoom-in', 'fit', 'close'].map(key => actionButton(key, true)).join('');
+    document.body.append(toolbar);
+    const unbind = bindActions(toolbar);
+    let frame = null;
+
+    function update() {
+        frame = null;
+        const avatar = getActiveAvatar();
+        toolbar.hidden = !getSettings().enabled || !avatar?.isConnected;
+        if (toolbar.hidden) return;
+        const rect = avatar.getBoundingClientRect();
+        const viewport = window.visualViewport;
+        const left = viewport?.offsetLeft ?? 0;
+        const top = viewport?.offsetTop ?? 0;
+        const width = viewport?.width ?? window.innerWidth;
+        const height = viewport?.height ?? window.innerHeight;
+        const style = getComputedStyle(toolbar);
+        const inset = side => (parseFloat(style[`scrollMargin${side}`]) || 0) + 8;
+        const minX = left + inset('Left');
+        const minY = top + inset('Top');
+        const maxX = Math.max(minX, left + width - inset('Right') - toolbar.offsetWidth);
+        const maxY = Math.max(minY, top + height - inset('Bottom') - toolbar.offsetHeight);
+        const x = Math.min(maxX, Math.max(minX, rect.left + rect.width / 2 - toolbar.offsetWidth / 2));
+        const y = Math.min(maxY, Math.max(minY, rect.top - toolbar.offsetHeight - 8));
+        toolbar.style.left = `${x}px`;
+        toolbar.style.top = `${y}px`;
+        toolbar.style.zIndex = String(Math.max(1001, Number(getComputedStyle(avatar).zIndex) || 0) + 1);
+    }
+
+    function schedule() {
+        if (frame === null) frame = requestAnimationFrame(update);
+    }
+
+    const listeners = [
+        [document, 'am:avatars-changed'], [document, 'am:transform'],
+        [document, 'am:settings-changed'], [window, 'resize'],
+    ];
+    if (window.visualViewport) {
+        listeners.push([window.visualViewport, 'resize'], [window.visualViewport, 'scroll']);
+    }
+    for (const [target, event] of listeners) target.addEventListener(event, schedule);
+    const sizeObserver = new ResizeObserver(schedule);
+    sizeObserver.observe(toolbar);
+    update();
+    dispose = () => {
+        if (frame !== null) cancelAnimationFrame(frame);
+        for (const [target, event] of listeners) target.removeEventListener(event, schedule);
+        sizeObserver.disconnect();
+        unbind();
+        toolbar.remove();
+    };
 }
 
 export function removeMobileControls() {
-    stopAllRepeats();
-    document.getElementById(CSS_CLASSES.MOBILE_CONTROLS)?.remove();
+    dispose?.();
+    dispose = null;
 }

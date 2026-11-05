@@ -5,6 +5,7 @@
 import { dragState } from '../shared/state.js';
 import { CSS_CLASSES } from '../shared/constants.js';
 import { getSettings } from '../shared/settings.js';
+import { beginFeedback, endFeedback } from './feedback.js';
 
 export function startDrag(e, target) {
     dragState.mode = 'drag';
@@ -14,9 +15,7 @@ export function startDrag(e, target) {
     dragState.startPointerY = e.clientY;
 
     target.classList.add(CSS_CLASSES.DRAGGING);
-    target.style.transition = 'none';
-
-    if (getSettings().ghostDragEffect) target.style.opacity = '0.7';
+    beginFeedback(target, getSettings().ghostDragEffect ? 0.7 : undefined);
 }
 
 export function updateDrag(e) {
@@ -27,6 +26,5 @@ export function updateDrag(e) {
 export function endDrag(target) {
     if (!target) return;
     target.classList.remove(CSS_CLASSES.DRAGGING);
-    target.style.opacity = '';
-    target.style.transition = '';
+    endFeedback(target);
 }

@@ -1,166 +1,153 @@
-// ============================================================================
-//  Settings - uses SillyTavern's native `extension_settings` object so values
-//  are synchronised to the server via `saveSettingsDebounced()`.
-//
-//  In addition to user preferences we store `savedPositions`: a map of
-//  characterKey -> { x, y, scale, rotation } used to restore a character's
-//  avatar transform every time SillyTavern remounts the .zoomed_avatar node.
-// ============================================================================
+import { EXT_NAME, LIMITS } from './constants.js';
+import { normaliseSource } from './avatar-source.js';
 
-import { EXT_NAME } from './constants.js';
-
-// Grab the context lazily so we work regardless of when this module is imported.
 function ctx() {
-    // Prefer the modern `SillyTavern.getContext()` API. Fall back to the
-    // classic globals for older SillyTavern builds.
-    if (globalThis.SillyTavern?.getContext) return globalThis.SillyTavern.getContext();
-    return {
+    const context = globalThis.SillyTavern?.getContext?.() ?? {
         extensionSettings: globalThis.extension_settings,
         saveSettingsDebounced: globalThis.saveSettingsDebounced,
     };
+    if (!isRecord(context.extensionSettings)) {
+        throw new Error('Avatar Manipulator: SillyTavern extension settings are not ready');
+    }
+    return context;
 }
 
 export const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     enableRotation: true,
-    zIndexMode: 'aboveUI',            // 'background' | 'aboveChat' | 'aboveUI'
-    ghostDragEffect: true,             // Fade avatar during interaction
-    showToasts: true,                  // Toast on reset
-
-    // Zoom
-    zoomSpeed: 0.1,                    // Desktop wheel step
-    mobileZoomStep: 0.1,               // On-screen zoom button step
-
-    // Rotate
-    rotationThreshold: 0.7,            // 0 = rotate from center, 1 = only at edge
+    zIndexMode: 'aboveUI',
+    ghostDragEffect: true,
+    showToasts: true,
+    zoomSpeed: 0.1,
+    mobileZoomStep: 0.1,
+    rotationThreshold: 0.7,
     enableMultiTouchRotate: true,
-    multiTouchRotateSpeed: 1.0,
-
-    // Mobile
-    doubleTapTimeout: 300,             // ms window for a second tap
-    longPressDuration: 600,            // ms hold for reset
-    mobileMoveStep: 20,                // px per tick on on-screen arrows
-    mobileRotateStep: 10,              // deg per tick on on-screen rotate buttons
-    mobileYBias: 200,                  // px added to the mobile reset centre (positive = lower)
-
-    // Saved transforms per character/avatar (auto-managed, do not edit manually)
+    multiTouchRotateSpeed: 1,
+    doubleTapTimeout: 300,
+    longPressDuration: 600,
+    mobileMoveStep: 20,
+    mobileRotateStep: 10,
+    mobileYBias: 0, // Retained for older installations; no longer applied.
     savedPositions: {},
     customImages: {},
 });
 
-// Ensure our slice of `extension_settings` exists and every default key is present
-// (so users updating from older versions never see `undefined`).
+const RANGES = {
+    zoomSpeed: [0.05, 0.5], mobileZoomStep: [0.05, 0.5],
+    rotationThreshold: [0.1, 0.95], multiTouchRotateSpeed: [0.25, 2],
+    doubleTapTimeout: [150, 600], longPressDuration: [300, 1500],
+    mobileMoveStep: [5, 60], mobileRotateStep: [1, 45],
+};
+const INTEGER_KEYS = new Set(['doubleTapTimeout', 'longPressDuration', 'mobileMoveStep', 'mobileRotateStep']);
+const isRecord = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const finite = (value, fallback) => typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+const bound = (value, min, max) => Math.min(max, Math.max(min, value));
+
+export function sanitisePosition(value) {
+    if (!isRecord(value)) return null;
+    const position = {
+        x: finite(value.x, 0),
+        y: finite(value.y, 0),
+        scale: bound(finite(value.scale, 1), LIMITS.SCALE_MIN, LIMITS.SCALE_MAX),
+        rotation: ((finite(value.rotation, 0) % 360) + 360) % 360,
+    };
+    if (Number.isFinite(value.savedAt)) position.savedAt = value.savedAt;
+    return position;
+}
+
+// Mutate an existing settings object so UI bindings keep the same reference.
 export function initSettings() {
     const context = ctx();
-    if (!context.extensionSettings[EXT_NAME]) {
-        context.extensionSettings[EXT_NAME] = structuredClone(DEFAULT_SETTINGS);
-    }
-    for (const key of Object.keys(DEFAULT_SETTINGS)) {
-        if (!Object.hasOwn(context.extensionSettings[EXT_NAME], key)) {
-            context.extensionSettings[EXT_NAME][key] = structuredClone(DEFAULT_SETTINGS[key]);
-        }
-    }
-
+    if (!isRecord(context.extensionSettings[EXT_NAME])) context.extensionSettings[EXT_NAME] = {};
     const current = context.extensionSettings[EXT_NAME];
-    if (typeof current.mobileYBias !== 'number' || current.mobileYBias < 150 || current.mobileYBias > 500) {
-        current.mobileYBias = DEFAULT_SETTINGS.mobileYBias;
+    for (const [key, fallback] of Object.entries(DEFAULT_SETTINGS)) {
+        if (typeof fallback === 'boolean' && typeof current[key] !== 'boolean') current[key] = fallback;
     }
-
-    return context.extensionSettings[EXT_NAME];
+    for (const [key, [min, max]] of Object.entries(RANGES)) {
+        const value = bound(finite(current[key], DEFAULT_SETTINGS[key]), min, max);
+        current[key] = INTEGER_KEYS.has(key) ? Math.round(value) : value;
+    }
+    if (!['background', 'aboveChat', 'aboveUI'].includes(current.zIndexMode)) current.zIndexMode = DEFAULT_SETTINGS.zIndexMode;
+    current.mobileYBias = finite(current.mobileYBias, DEFAULT_SETTINGS.mobileYBias);
+    const positions = Object.create(null);
+    for (const [key, value] of Object.entries(isRecord(current.savedPositions) ? current.savedPositions : {})) {
+        const position = sanitisePosition(value);
+        if (position) positions[key] = position;
+    }
+    const images = Object.create(null);
+    for (const [key, value] of Object.entries(isRecord(current.customImages) ? current.customImages : {})) {
+        const source = normaliseSource(value);
+        if (source) images[key] = source;
+    }
+    current.savedPositions = positions;
+    current.customImages = images;
+    return current;
 }
 
 export function getSettings() {
     return ctx().extensionSettings[EXT_NAME] || initSettings();
 }
 
-// Debounced by SillyTavern - safe to spam.
 export function saveSettings() {
     ctx().saveSettingsDebounced?.();
 }
 
 export function getCustomImageSource(el) {
     const key = getAvatarKey(el);
-    if (!key) return null;
-    return getSettings().customImages?.[key] ?? null;
+    return key ? getSettings().customImages?.[key] ?? null : null;
 }
 
 export function setCustomImageSource(el, source) {
     const key = getAvatarKey(el);
-    if (!key) return;
-    const settings = getSettings();
-    if (!settings.customImages) settings.customImages = {};
-    settings.customImages[key] = source;
+    const valid = normaliseSource(source);
+    if (!key || !valid) return;
+    getSettings().customImages[key] = valid;
     saveSettings();
 }
 
 export function clearCustomImageSource(el) {
     const key = getAvatarKey(el);
-    if (!key) return;
-
-    const settings = getSettings();
-
-    if (settings.customImages) {
-        delete settings.customImages[key];
+    const images = getSettings().customImages;
+    if (key && Object.hasOwn(images, key)) {
+        delete images[key];
         saveSettings();
     }
 }
 
-// -------------------- per-character position persistence --------------------
-
-// Derive a stable key for an avatar. Prefers SillyTavern's `forChar` attribute
-// (populated on the zoomed avatar element) and falls back to the image path.
-const ORIGINAL_SRC_DATAKEY = 'amOriginalSrc';
-const AVATAR_KEY_DATAKEY = 'amAvatarKey';
-
+// Preserve the upstream key format so existing positions and replacements work.
 export function getAvatarKey(el) {
     if (!el) return null;
-    if (el.dataset[AVATAR_KEY_DATAKEY]) return el.dataset[AVATAR_KEY_DATAKEY];
-
+    if (el.dataset.amAvatarKey) return el.dataset.amAvatarKey;
     const forChar = el.getAttribute('forChar') || el.getAttribute('data-char');
-    if (forChar) {
-        const key = `char:${forChar}`;
-        el.dataset[AVATAR_KEY_DATAKEY] = key;
-        return key;
-    }
-
-    const img = el.querySelector('img');
-    if (!img) return null;
-
-    const original = el.dataset[ORIGINAL_SRC_DATAKEY] || img.dataset[ORIGINAL_SRC_DATAKEY];
-    const src = original || img.src;
+    if (forChar) return (el.dataset.amAvatarKey = `char:${forChar}`);
+    const image = el.querySelector('img');
+    const src = el.dataset.amOriginalSrc || image?.dataset.amOriginalSrc || image?.getAttribute('src');
     if (!src) return null;
-
-    const key = (() => {
-        try {
-            return `img:${new URL(src, window.location.href).pathname}`;
-        } catch {
-            return `img:${src}`;
-        }
-    })();
-    el.dataset[AVATAR_KEY_DATAKEY] = key;
+    let key;
+    try { key = `img:${new URL(src, globalThis.location?.href ?? 'http://localhost/').pathname}`; }
+    catch { key = `img:${src}`; }
+    el.dataset.amAvatarKey = key;
     return key;
 }
 
 export function loadPosition(el) {
     const key = getAvatarKey(el);
-    if (!key) return null;
-    return getSettings().savedPositions?.[key] ?? null;
+    return key ? sanitisePosition(getSettings().savedPositions?.[key]) : null;
 }
 
 export function savePosition(el, transform) {
     const key = getAvatarKey(el);
-    if (!key) return;
-    const settings = getSettings();
-    settings.savedPositions[key] = { ...transform, savedAt: Date.now() };
+    const position = sanitisePosition(transform);
+    if (!key || !position) return;
+    getSettings().savedPositions[key] = { ...position, savedAt: Date.now() };
     saveSettings();
 }
 
 export function clearPosition(el) {
     const key = getAvatarKey(el);
-    if (!key) return;
-    const settings = getSettings();
-    if (settings.savedPositions[key]) {
-        delete settings.savedPositions[key];
+    const positions = getSettings().savedPositions;
+    if (key && Object.hasOwn(positions, key)) {
+        delete positions[key];
         saveSettings();
     }
 }

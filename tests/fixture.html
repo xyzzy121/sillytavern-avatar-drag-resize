@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Avatar Manipulator regression fixture</title>
+<link rel="stylesheet" href="/host/style.css"><link rel="stylesheet" href="/host/css/mobile-styles.css">
+<link rel="stylesheet" href="/host/css/fontawesome.min.css"><link rel="stylesheet" href="/host/css/solid.min.css">
+<link rel="stylesheet" href="/host/webfonts/NotoSans/stylesheet.css"><link rel="stylesheet" href="/style.css">
+<style>
+/* Minimal host contract also makes the suite runnable without a sibling ST checkout. */
+:root { --SmartThemeBodyColor: #e9e9ed; --SmartThemeEmColor: #b1b6c1; --SmartThemeBlurTintColor: #252831; --SmartThemeBorderColor: #555b68; }
+body { margin: 0; color: var(--SmartThemeBodyColor); background: #171a22; overflow:auto; height:100dvh; font-family: 'Noto Sans', sans-serif; }
+#extensions_settings { position: relative; width: min(100%, 440px); padding: 12px; box-sizing:border-box; background:var(--SmartThemeBlurTintColor); }
+.inline-drawer-content { display:none; } .menu_button { cursor:pointer; color:inherit; border:1px solid var(--SmartThemeBorderColor); background:var(--SmartThemeBlurTintColor); border-radius:5px; }
+.text_pole { color:inherit; background:var(--SmartThemeBlurTintColor); width:100%; } .flex-container { display:flex; gap:5px; } .checkbox_label { display:flex; gap:8px; align-items:center; }
+.zoomed_avatar { position:fixed; width:400px; height:600px; top:10px; left:10px; } .zoomed_avatar img { width:100%; height:100%; object-fit:contain; }
+.panelControlBar { opacity:0; } .zoomed_avatar:hover .panelControlBar { opacity:1; } .dragClose { cursor:pointer; }
+</style></head><body><div id="extensions_settings"></div><main id="chat"><p>Avatar viewer test chat</p></main>
+<script type="module">
+const context = { extensionSettings: {}, saveSettingsDebounced() { window.saveCount++; } };
+window.saveCount = 0;
+window.SillyTavern = { getContext: () => context };
+window.toastr = { info() {} };
+document.addEventListener('click', e => {
+    const toggle = e.target.closest('.inline-drawer-toggle');
+    if (toggle) { const content = toggle.nextElementSibling; content.style.display = content.style.display === 'block' ? 'none' : 'block'; }
+    e.target.closest('.dragClose')?.closest('.zoomed_avatar')?.remove();
+});
+// Reproduce ST's global keyboard handler to catch double activation.
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('.menu_button')) e.target.click(); });
+const lifecycle = await import('/src/lifecycle.js');
+const avatar = await import('/src/shared/avatar.js');
+const settings = await import('/src/shared/settings.js');
+const state = await import('/src/shared/state.js');
+const images = await import('/src/shared/image.js');
+window.testApi = { context, lifecycle, avatar, settings, state, images,
+    async openAvatar(key = 'persona', width = 2400, height = 6400) {
+        const el = document.createElement('div'); el.className = 'zoomed_avatar'; el.style.display = 'flex'; el.setAttribute('forChar', key); el.id = 'avatar-' + key;
+        el.innerHTML = '<div class="panelControlBar"><div class="drag-grabber"></div><div class="dragClose" role="button" aria-label="Native close">×</div></div><div class="zoomed_avatar_container"><img class="zoomed_avatar_img" alt="Test persona"></div>';
+        const img = el.querySelector('img');
+        img.src = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#536a7d"/><circle cx="50%" cy="30%" r="${Math.min(width,height)/4}" fill="#bdc6c2"/><path d="M0 ${height} Q ${width/2} ${height/3} ${width} ${height}" fill="#8dabad"/></svg>`);
+        await img.decode(); document.body.append(el); await new Promise(r => setTimeout(r, 30)); return el.id;
+    },
+};
+await lifecycle.init();
+window.ready = true;
+</script></body></html>

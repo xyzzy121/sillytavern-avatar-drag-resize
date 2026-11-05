@@ -9,10 +9,11 @@ import { dragState, rotationState } from '../shared/state.js';
 import { CSS_CLASSES } from '../shared/constants.js';
 import { angleFromCenter, wrapAngleDelta } from '../shared/utils.js';
 import { getSettings } from '../shared/settings.js';
+import { beginFeedback, endFeedback } from './feedback.js';
 
 export function shouldRotate(e, target) {
     const settings = getSettings();
-    if (!settings.enableRotation) return false;
+    if (!settings.enableRotation || e.pointerType === 'touch') return false;
 
     const rect = target.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
@@ -31,13 +32,11 @@ export function startRotate(e, target) {
     rotationState.startAngle = angleFromCenter(e.clientX, e.clientY, rect);
 
     target.classList.add(CSS_CLASSES.ROTATING);
-    target.style.transition = 'none';
-    if (getSettings().ghostDragEffect) target.style.opacity = '0.9';
+    beginFeedback(target, getSettings().ghostDragEffect ? 0.9 : undefined);
 }
 
 export function updateRotate(e, target) {
-    const rect = target.getBoundingClientRect();
-    const current = angleFromCenter(e.clientX, e.clientY, rect);
+    const current = Math.atan2(e.clientY - rotationState.centerY, e.clientX - rotationState.centerX);
     const delta = wrapAngleDelta(current - rotationState.startAngle);
     rotationState.rotation += delta * (180 / Math.PI);
     rotationState.startAngle = current;
@@ -46,6 +45,5 @@ export function updateRotate(e, target) {
 export function endRotate(target) {
     if (!target) return;
     target.classList.remove(CSS_CLASSES.ROTATING);
-    target.style.opacity = '';
-    target.style.transition = '';
+    endFeedback(target);
 }

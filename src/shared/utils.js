@@ -7,14 +7,14 @@ import { CSS_CLASSES, EXCLUDED_SELECTOR, Z_INDEX_MAP } from './constants.js';
 // -------------------- DOM helpers --------------------
 
 export function getAvatar(el) {
-    return el?.closest?.(`.${CSS_CLASSES.AVATAR}`) ?? null;
+    return el?.closest?.(`.${CSS_CLASSES.AVATAR}.am-managed`) ?? null;
 }
 
 // Prefer the most recently interacted avatar, otherwise the first one on screen.
 export function getActiveAvatar() {
     return (
-        document.querySelector(`.${CSS_CLASSES.AVATAR}.${CSS_CLASSES.ACTIVE}`) ??
-        document.querySelector(`.${CSS_CLASSES.AVATAR}`)
+        document.querySelector(`.${CSS_CLASSES.AVATAR}.am-managed.${CSS_CLASSES.ACTIVE}`) ??
+        document.querySelector(`.${CSS_CLASSES.AVATAR}.am-managed`)
     );
 }
 
@@ -71,20 +71,11 @@ export function vibrate(pattern = 10) {
     try { navigator.vibrate?.(pattern); } catch { /* iOS refuses without user gesture */ }
 }
 
-// Prefer SillyTavern's toastr if present; fallback to a plain fixed div.
+// Use the host notification UI; avoid extra DOM/timers outside our lifecycle.
 export function toast(message) {
     if (typeof globalThis.toastr !== 'undefined') {
         globalThis.toastr.info(message, '', { timeOut: 1200 });
         return;
     }
-    const existing = document.getElementById('am_toast');
-    existing?.remove();
-    const el = document.createElement('div');
-    el.id = 'am_toast';
-    el.textContent = message;
-    el.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);' +
-        'background:rgba(0,0,0,0.85);color:#fff;padding:10px 24px;border-radius:20px;' +
-        'font:14px sans-serif;z-index:99999999;pointer-events:none;';
-    document.body.appendChild(el);
-    setTimeout(() => el.remove(), 1200);
+    console.info('[AvatarManip]', message);
 }

@@ -7,6 +7,7 @@ import { CSS_CLASSES, LIMITS } from '../shared/constants.js';
 import { clamp, twoPointAngle, twoPointDistance, wrapAngleDelta } from '../shared/utils.js';
 import { readAvatar } from '../shared/avatar.js';
 import { getSettings } from '../shared/settings.js';
+import { beginFeedback, endFeedback } from './feedback.js';
 
 export function startPinch(target, touches) {
     if (touches.length < 2) return;
@@ -19,15 +20,20 @@ export function startPinch(target, touches) {
     touchState.pinchScale0 = dragState.scale;
     touchState.pinchAngle0 = twoPointAngle(touches[0], touches[1]);
     touchState.pinchRotation0 = rotationState.rotation;
+    touchState.pinchX0 = dragState.x;
+    touchState.pinchY0 = dragState.y;
+    touchState.pinchCenterX = (touches[0].clientX + touches[1].clientX) / 2;
+    touchState.pinchCenterY = (touches[0].clientY + touches[1].clientY) / 2;
 
     target.classList.add(CSS_CLASSES.PINCHING);
-    target.style.transition = 'none';
-    if (getSettings().ghostDragEffect) target.style.opacity = '0.8';
+    beginFeedback(target, getSettings().ghostDragEffect ? 0.8 : undefined);
 }
 
 export function updatePinch(touches) {
     if (!touchState.isPinching || touches.length < 2) return;
     const settings = getSettings();
+    dragState.x = touchState.pinchX0 + (touches[0].clientX + touches[1].clientX) / 2 - touchState.pinchCenterX;
+    dragState.y = touchState.pinchY0 + (touches[0].clientY + touches[1].clientY) / 2 - touchState.pinchCenterY;
 
     // Scale
     const currentDist = twoPointDistance(touches[0], touches[1]);
@@ -50,6 +56,5 @@ export function endPinch(target) {
     touchState.pinchDistance0 = 0;
     if (!target) return;
     target.classList.remove(CSS_CLASSES.PINCHING);
-    target.style.opacity = '';
-    target.style.transition = '';
+    endFeedback(target);
 }

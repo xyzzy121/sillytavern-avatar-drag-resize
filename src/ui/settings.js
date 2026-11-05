@@ -1,163 +1,106 @@
-// ============================================================================
-//  UI - Settings panel injected into #extensions_settings.
-//  Uses vanilla DOM APIs (no jQuery event delegation) for reliability.
-// ============================================================================
-
 import { CSS_CLASSES } from '../shared/constants.js';
 import { getSettings, saveSettings } from '../shared/settings.js';
-import { isMobileDevice } from '../shared/utils.js';
 import { applyZIndexEverywhere } from '../observer.js';
-import { readAvatar, writeAvatar } from '../shared/avatar.js';
-import { pickAndApplyLocalImage, resetCustomImage } from '../shared/image.js';
+import { actionButton, bindActions } from './actions.js';
 
-// Poll until SillyTavern's extension settings panel exists, then run `fn`.
-function whenPanelReady(fn, attempts = 60) {
-    const panel = document.getElementById('extensions_settings');
-    if (panel) { fn(panel); return; }
-    if (attempts <= 0) return;
-    setTimeout(() => whenPanelReady(fn, attempts - 1), 500);
+let dispose = null;
+let retryTimer = null;
+
+function checkbox(key, label, settings) {
+    return `<label class="checkbox_label"><input type="checkbox" data-am-key="${key}" ${settings[key] ? 'checked' : ''}><span>${label}</span></label>`;
+}
+
+function range(label, key, settings, min, max, step) {
+    const value = Number(settings[key]);
+    return `<div class="am-setting"><label for="am-${key}" class="am-range-label"><span>${label}</span><output for="am-${key}" data-am-value="${key}">${value}</output></label><input id="am-${key}" type="range" data-am-key="${key}" min="${min}" max="${max}" step="${step}" value="${value}"></div>`;
 }
 
 function html(s) {
-    return `
-    <div id="${CSS_CLASSES.SETTINGS_CONTAINER}" class="extension_container">
+    return `<div id="${CSS_CLASSES.SETTINGS_CONTAINER}" class="extension_container">
         <div class="inline-drawer">
-            <div class="inline-drawer-toggle inline-drawer-header">
-                <b>Avatar Manipulator</b>
-                <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-            </div>
-            <div class="inline-drawer-content" style="padding:10px 5px;">
-                <label class="checkbox_label m-b-1">
-                    <input type="checkbox" data-am-key="enabled" ${s.enabled ? 'checked' : ''}>
-                    <span>Enable Extension</span>
-                </label>
-                <label class="checkbox_label m-b-1">
-                    <input type="checkbox" data-am-key="enableRotation" ${s.enableRotation ? 'checked' : ''}>
-                    <span>Enable Rotation</span>
-                </label>
-                <div class="flex-container m-b-1" style="flex-direction:column;gap:5px;">
-                    <label><b>Layer Position (Z-Index)</b></label>
-                    <select data-am-key="zIndexMode" class="text_pole" style="width:100%;padding:6px;">
-                        <option value="background"${s.zIndexMode === 'background' ? ' selected' : ''}>Background</option>
-                        <option value="aboveChat"${s.zIndexMode === 'aboveChat' ? ' selected' : ''}>Above Chat</option>
-                        <option value="aboveUI"${s.zIndexMode === 'aboveUI' ? ' selected' : ''}>Above UI</option>
-                    </select>
+            <div class="inline-drawer-toggle inline-drawer-header"><b>Avatar Manipulator</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+            <div class="inline-drawer-content">
+                <div class="am-settings-content">
+                    ${checkbox('enabled', 'Enable Avatar Manipulator', s)}
+                    <p class="am-hint">Open an avatar in chat, then drag to move it. Pinch or scroll to zoom. Double-tap or hold to fit the image.</p>
+                    <section class="am-section" aria-label="Image controls">
+                        <b>Image controls</b>
+                        <div class="am-action-grid">${['zoom-out', 'zoom-in', 'fit', 'close', 'rotate-left', 'rotate-right'].map(key => actionButton(key)).join('')}</div>
+                        <div class="am-move-controls" role="group" aria-label="Move image">${['move-left', 'move-up', 'move-down', 'move-right'].map(key => actionButton(key, true)).join('')}</div>
+                        <div class="am-action-grid">${actionButton('image')}${actionButton('reset-image')}</div>
+                        <small class="am-hint">Controls apply to the last image you touched. Image replacements affect this viewer only.</small>
+                    </section>
+                    <section class="am-section" aria-label="Preferences">
+                        <b>Preferences</b>
+                        <label for="am-zIndexMode">Image layer</label>
+                        <select id="am-zIndexMode" class="text_pole" data-am-key="zIndexMode">
+                            <option value="background" ${s.zIndexMode === 'background' ? 'selected' : ''}>Background</option>
+                            <option value="aboveChat" ${s.zIndexMode === 'aboveChat' ? 'selected' : ''}>Above chat</option>
+                            <option value="aboveUI" ${s.zIndexMode === 'aboveUI' ? 'selected' : ''}>Above interface</option>
+                        </select>
+                        ${checkbox('enableRotation', 'Allow rotation', s)}
+                        ${checkbox('enableMultiTouchRotate', 'Rotate with two fingers', s)}
+                        ${checkbox('ghostDragEffect', 'Fade image while moving', s)}
+                        ${checkbox('showToasts', 'Show notifications', s)}
+                    </section>
+                    <details class="am-advanced"><summary>Advanced</summary><div class="am-advanced-content">
+                        ${range('Wheel zoom speed', 'zoomSpeed', s, 0.05, 0.5, 0.05)}
+                        ${range('Button zoom step', 'mobileZoomStep', s, 0.05, 0.5, 0.05)}
+                        ${range('Button move step (px)', 'mobileMoveStep', s, 5, 60, 5)}
+                        ${range('Button rotation step (°)', 'mobileRotateStep', s, 1, 45, 1)}
+                        ${range('Edge rotation threshold', 'rotationThreshold', s, 0.1, 0.95, 0.05)}
+                        ${range('Two-finger rotation speed', 'multiTouchRotateSpeed', s, 0.25, 2, 0.05)}
+                        ${range('Double-tap interval (ms)', 'doubleTapTimeout', s, 150, 600, 50)}
+                        ${range('Hold to fit delay (ms)', 'longPressDuration', s, 300, 1500, 50)}
+                    </div></details>
                 </div>
-                <label class="checkbox_label m-b-1">
-                    <input type="checkbox" data-am-key="ghostDragEffect" ${s.ghostDragEffect ? 'checked' : ''}>
-                    <span>Opacity Feedback</span>
-                </label>
-                <label class="checkbox_label m-b-1">
-                    <input type="checkbox" data-am-key="showToasts" ${s.showToasts ? 'checked' : ''}>
-                    <span>Show Toast Notifications</span>
-                </label>
-
-                <div style="margin:10px 0;padding:10px;border:1px solid rgba(255,255,255,0.12);border-radius:10px;">
-                    <div style="font-weight:bold;margin-bottom:8px;">Avatar Image</div>
-                    <div style="display:flex;flex-wrap:wrap;gap:8px;">
-                        <button type="button" data-am-action="changeImage"
-                                style="flex:1 1 calc(50% - 4px);padding:10px;border:none;border-radius:8px;background:var(--accent-color,#4a90e2);color:#fff;cursor:pointer;">
-                            Change Avatar Image
-                        </button>
-                        <button type="button" data-am-action="resetImage"
-                                style="flex:1 1 calc(50% - 4px);padding:10px;border:none;border-radius:8px;background:#ff6b6b;color:#fff;cursor:pointer;">
-                            Reset Avatar Image
-                        </button>
-                    </div>
-                </div>
-
-                ${range('Zoom Speed (wheel)',       'zoomSpeed',         s.zoomSpeed,         0.05, 0.5,  0.05)}
-                ${range('Rotation Threshold',      'rotationThreshold', s.rotationThreshold, 0.1,  0.95, 0.05)}
-
-                ${isMobileDevice() ? `
-                <hr style="margin:10px 0;opacity:0.3;">
-                <div style="font-weight:bold;margin:6px 0 8px 0;">Mobile</div>
-                <label class="checkbox_label m-b-1">
-                    <input type="checkbox" data-am-key="enableMultiTouchRotate" ${s.enableMultiTouchRotate ? 'checked' : ''}>
-                    <span>Two-Finger Rotate</span>
-                </label>
-                ${range('Two-Finger Rotate Speed', 'multiTouchRotateSpeed', s.multiTouchRotateSpeed, 0.25, 2, 0.05)}
-                ${range('Zoom Step (buttons)',    'mobileZoomStep',        s.mobileZoomStep,        0.05, 0.5, 0.05)}
-                ${range('Move Step (buttons, px)','mobileMoveStep',        s.mobileMoveStep,        5,    60,  5, true)}
-                ${range('Rotate Step (buttons, °)','mobileRotateStep',     s.mobileRotateStep,      1,    45,  1, true)}
-                ${range('Reset Y Bias (px, +=lower)','mobileYBias',        s.mobileYBias,           150, 500, 5, true)}
-                ${range('Double-Tap Timeout (ms)','doubleTapTimeout',      s.doubleTapTimeout,      150,  600, 50, true)}
-                ${range('Long-Press Duration (ms)','longPressDuration',    s.longPressDuration,     300, 1500, 50, true)}
-                ` : ''}
             </div>
         </div>
     </div>`;
 }
 
-function range(label, key, value, min, max, step, integer = false) {
-    return `
-        <div class="flex-container m-b-1" style="flex-direction:column;gap:5px;">
-            <label style="display:flex;justify-content:space-between;">
-                <span>${label}</span>
-                <span data-am-value="${key}">${integer ? value : Number(value).toFixed(2)}</span>
-            </label>
-            <input type="range" data-am-key="${key}" data-am-int="${integer ? 1 : 0}"
-                   min="${min}" max="${max}" step="${step}" value="${value}" style="width:100%;">
-        </div>`;
-}
-
-// Wire every input inside the settings panel back to `extension_settings`.
-function bind(root) {
-    const settings = getSettings();
-    root.querySelectorAll('[data-am-key]').forEach((el) => {
-        const key = el.dataset.amKey;
-        const readValue = () => {
-            if (el.type === 'checkbox') return el.checked;
-            if (el.type === 'range' || el.type === 'number') {
-                const num = el.dataset.amInt === '1' ? parseInt(el.value, 10) : parseFloat(el.value);
-                return Number.isFinite(num) ? num : settings[key];
-            }
-            return el.value;
-        };
-        const eventName = el.type === 'range' ? 'input' : 'change';
-        el.addEventListener(eventName, () => {
-            settings[key] = readValue();
-            // Live label for range inputs
-            const label = root.querySelector(`[data-am-value="${key}"]`);
-            if (label) label.textContent = el.dataset.amInt === '1' ? settings[key] : Number(settings[key]).toFixed(2);
-            // Live side-effects
-            if (key === 'zIndexMode') applyZIndexEverywhere();
-            if (key === 'mobileYBias') {
-                // Re-apply transform to every mounted avatar so the new bias
-                // takes effect immediately.
-                document.querySelectorAll(`.${CSS_CLASSES.AVATAR}`).forEach((av) => {
-                    readAvatar(av);
-                    writeAvatar(av, { persist: false });
-                });
-            }
-            saveSettings();
-        });
-    });
-
-    root.querySelectorAll('[data-am-action]').forEach((button) => {
-        button.addEventListener('click', async () => {
-            const action = button.dataset.amAction;
-            const avatar = document.querySelector(`.${CSS_CLASSES.AVATAR}.${CSS_CLASSES.ACTIVE}`) || document.querySelector(`.${CSS_CLASSES.AVATAR}`);
-            if (action === 'changeImage') {
-                await pickAndApplyLocalImage(avatar);
-                return;
-            }
-            if (action === 'resetImage') {
-                if (avatar) resetCustomImage(avatar);
-            }
-        });
-    });
-}
-
-export function createSettingsUI() {
-    whenPanelReady((panel) => {
-        document.getElementById(CSS_CLASSES.SETTINGS_CONTAINER)?.remove();
+export function createSettingsUI({ onEnabledChange } = {}) {
+    removeSettingsUI();
+    let attempts = 60;
+    const mount = () => {
+        retryTimer = null;
+        const panel = document.getElementById('extensions_settings');
+        if (!panel) {
+            if (--attempts > 0) retryTimer = setTimeout(mount, 500);
+            return;
+        }
         panel.insertAdjacentHTML('beforeend', html(getSettings()));
         const root = document.getElementById(CSS_CLASSES.SETTINGS_CONTAINER);
-        if (root) bind(root);
-    });
+        const unbind = bindActions(root);
+        const abort = new AbortController();
+        const update = event => {
+            const input = event.target.closest('[data-am-key]');
+            if (!input) return;
+            if ((input.type === 'range') !== (event.type === 'input')) return;
+            const settings = getSettings();
+            const key = input.dataset.amKey;
+            let value = input.type === 'checkbox' ? input.checked : input.value;
+            if (input.type === 'range') {
+                value = Math.min(Number(input.max), Math.max(Number(input.min), Number(value)));
+                if (!Number.isFinite(value)) return;
+                root.querySelector(`[data-am-value="${key}"]`).textContent = String(value);
+            }
+            settings[key] = value;
+            saveSettings();
+            if (key === 'enabled') onEnabledChange?.(value);
+            if (key === 'zIndexMode') applyZIndexEverywhere();
+            document.dispatchEvent(new Event('am:settings-changed'));
+        };
+        root.addEventListener('input', update, { signal: abort.signal });
+        root.addEventListener('change', update, { signal: abort.signal });
+        dispose = () => { abort.abort(); unbind(); root.remove(); };
+    };
+    mount();
 }
 
 export function removeSettingsUI() {
-    document.getElementById(CSS_CLASSES.SETTINGS_CONTAINER)?.remove();
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    dispose?.();
+    dispose = null;
 }

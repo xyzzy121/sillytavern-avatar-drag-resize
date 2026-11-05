@@ -1,158 +1,100 @@
-// ============================================================================
-//  Avatar - read/write/reset the transform of a single .zoomed_avatar element.
-//
-//  Desktop:  we ONLY set CSS custom properties on the element.  All positioning
-//            and centering lives in style.css - the SillyTavern desktop layout
-//            is untouched, letting SillyTavern's own inline transforms compose
-//            with our CSS variables through the cascade rules that were tested
-//            and working in v2.0.4.
-//
-//  Mobile:   SillyTavern 1.18 writes an inline `style="transform: ..."` on the
-//            zoomed_avatar element as it opens.  On small viewports that ends
-//            up positioning the avatar off-screen.  For MOBILE ONLY we bake
-//            our own transform / top / left inline with `!important` priority
-//            so we always win the cascade and the avatar is guaranteed to
-//            appear centered.
-// ============================================================================
-
 import { dragState, rotationState } from './state.js';
-import { CSS_VARS, DATA_ATTRS, LIMITS } from './constants.js';
-import { clamp, normalizeAngle, toast, vibrate } from './utils.js';
-import { savePosition, clearPosition, loadPosition, getSettings } from './settings.js';
+import { CSS_VARS, DATA_ATTRS } from './constants.js';
+import { getAvatarKey, clearPosition, loadPosition, getSettings, saveSettings } from './settings.js';
+import { getZIndexValue, toast } from './utils.js';
+import { fitDimensions, constrainTransform, normalizeTransform } from './geometry.js';
+import { createPositionSaver } from './persistence.js';
 
-const MOBILE_BREAKPOINT = 768;
-function isMobileViewport() {
-    return window.innerWidth <= MOBILE_BREAKPOINT;
+const managed = new Map();
+const ownedProperties = ['position', 'top', 'left', 'right', 'bottom', 'margin', 'width', 'height',
+    'max-width', 'max-height', 'transform', '-webkit-transform', 'transform-origin', ...Object.values(CSS_VARS)];
+const saver = createPositionSaver((key, value) => {
+    getSettings().savedPositions[key] = { ...value, savedAt: Date.now() };
+    saveSettings();
+});
+export function getViewport() {
+    const viewport = window.visualViewport;
+    return { left: viewport?.offsetLeft ?? 0, top: viewport?.offsetTop ?? 0,
+        width: viewport?.width ?? window.innerWidth, height: viewport?.height ?? window.innerHeight };
 }
-
-// Pull element -> global state
+function values(el) {
+    return normalizeTransform({ x: Number(el.dataset[DATA_ATTRS.X] ?? 0),
+        y: Number(el.dataset[DATA_ATTRS.Y] ?? 0), scale: Number(el.dataset[DATA_ATTRS.SCALE] ?? 1),
+        rotation: Number(el.dataset[DATA_ATTRS.ROTATION] ?? 0) });
+}
 export function readAvatar(el) {
     if (!el) return;
-    dragState.x = parseFloat(el.dataset[DATA_ATTRS.X]) || 0;
-    dragState.y = parseFloat(el.dataset[DATA_ATTRS.Y]) || 0;
-    dragState.scale = parseFloat(el.dataset[DATA_ATTRS.SCALE]) || 1;
-    rotationState.rotation = parseFloat(el.dataset[DATA_ATTRS.ROTATION]) || 0;
+    const value = values(el);
+    Object.assign(dragState, { x: value.x, y: value.y, scale: value.scale });
+    rotationState.rotation = value.rotation;
 }
-
-let saveTimer = null;
-function scheduleSave(el) {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-        savePosition(el, {
-            x: dragState.x,
-            y: dragState.y,
-            scale: dragState.scale,
-            rotation: rotationState.rotation,
-        });
-        saveTimer = null;
-    }, 250);
+function render(el, value) {
+    if (!managed.has(el)) return null;
+    const viewport = getViewport();
+    const img = el.querySelector('img');
+    const size = fitDimensions(img?.naturalWidth || 400, img?.naturalHeight || 600, viewport);
+    const transform = constrainTransform(value, size, viewport);
+    for (const [key, dataKey] of Object.entries(DATA_ATTRS)) el.dataset[dataKey] = String(transform[key.toLowerCase()]);
+    const properties = {
+        position: 'fixed', left: `${viewport.left + viewport.width / 2}px`,
+        top: `${viewport.top + viewport.height / 2}px`, right: 'auto', bottom: 'auto', margin: '0',
+        width: `${size.width}px`, height: `${size.height}px`, 'max-width': 'none', 'max-height': 'none',
+        transform: `translate(-50%, -50%) translate(${transform.x}px, ${transform.y}px) scale(${transform.scale}) rotate(${transform.rotation}deg)`,
+        'transform-origin': 'center center',
+        [CSS_VARS.Z_INDEX]: String(getZIndexValue(getSettings().zIndexMode)),
+    };
+    for (const [key, value] of Object.entries(properties)) el.style.setProperty(key, value, 'important');
+    document.dispatchEvent(new CustomEvent('am:transform', { detail: { avatar: el } }));
+    return transform;
 }
-
-// Remove any inline layout properties we may have added earlier (used when
-// switching viewport sizes so a desktop reload doesn't inherit our mobile
-// overrides).
-function clearMobileInlineOverrides(el) {
-    el.style.removeProperty('top');
-    el.style.removeProperty('left');
-    el.style.removeProperty('right');
-    el.style.removeProperty('bottom');
-    el.style.removeProperty('margin');
-    el.style.removeProperty('transform');
-    el.style.removeProperty('-webkit-transform');
-    el.style.removeProperty('transform-origin');
-    // Do NOT remove `position` - style.css already forces `position: fixed`.
-    el.style.removeProperty('position');
-}
-
-// Push global state -> element.
 export function writeAvatar(el, { persist = true } = {}) {
-    if (!el) return;
-    const scale = clamp(dragState.scale, LIMITS.SCALE_MIN, LIMITS.SCALE_MAX);
-    const rotation = normalizeAngle(rotationState.rotation);
-    dragState.scale = scale;
-    rotationState.rotation = rotation;
-
-    // Persist to data-* so subsequent readAvatar sees the same values.
-    el.dataset[DATA_ATTRS.X] = String(dragState.x);
-    el.dataset[DATA_ATTRS.Y] = String(dragState.y);
-    el.dataset[DATA_ATTRS.SCALE] = String(scale);
-    el.dataset[DATA_ATTRS.ROTATION] = String(rotation);
-
-    // CSS custom properties - the primary channel on desktop, still used on
-    // mobile for the close-button counter-scale.
-    el.style.setProperty(CSS_VARS.X, `${dragState.x}px`);
-    el.style.setProperty(CSS_VARS.Y, `${dragState.y}px`);
-    el.style.setProperty(CSS_VARS.SCALE, String(scale));
-    el.style.setProperty(CSS_VARS.ROTATE, `${rotation}deg`);
-    el.style.setProperty(CSS_VARS.INVERSE_SCALE, String(1 / scale));
-
-    if (isMobileViewport()) {
-        // Mobile-only guard rail: bake a centered transform inline with
-        // !important so SillyTavern's own inline top/left/transform can't push
-        // the avatar off-screen.  `mobileYBias` shifts the visual centre down a
-        // touch on phones (a fully-centred sprite tends to sit above the
-        // comfortable thumb zone).
-        const yBias = getSettings().mobileYBias ?? 200;
-        const tx = `calc(-50% + ${dragState.x}px)`;
-        const ty = `calc(-50% + ${dragState.y + yBias}px)`;
-        const transform = `translate(${tx}, ${ty}) scale(${scale}) rotate(${rotation}deg)`;
-        el.style.setProperty('transform', transform, 'important');
-        el.style.setProperty('-webkit-transform', transform, 'important');
-        el.style.setProperty('transform-origin', 'center center', 'important');
-        el.style.setProperty('position', 'fixed', 'important');
-        el.style.setProperty('top', '50%', 'important');
-        el.style.setProperty('left', '50%', 'important');
-        el.style.setProperty('right', 'auto', 'important');
-        el.style.setProperty('bottom', 'auto', 'important');
-        el.style.setProperty('margin', '0', 'important');
-    } else {
-        // Desktop: clear any mobile-inline leftovers so the stylesheet keeps
-        // full control (this matches v2.0.4 behaviour byte-for-byte).
-        clearMobileInlineOverrides(el);
-    }
-
-    if (persist) scheduleSave(el);
+    const value = render(el, { x: dragState.x, y: dragState.y, scale: dragState.scale, rotation: rotationState.rotation });
+    if (!value) return;
+    Object.assign(dragState, { x: value.x, y: value.y, scale: value.scale });
+    rotationState.rotation = value.rotation;
+    if (persist) saver.schedule(getAvatarKey(el), value);
 }
-
-// Bring `el` back to center / 1x scale / 0 rotation and forget any saved state.
 export function resetAvatar(el) {
-    if (!el) return;
-    dragState.x = 0;
-    dragState.y = 0;
-    dragState.scale = 1;
-    rotationState.rotation = 0;
-    writeAvatar(el, { persist: false });
+    if (!managed.has(el)) return;
+    saver.cancel(getAvatarKey(el));
     clearPosition(el);
-
-    el.style.transition = 'transform 0.3s ease-out';
-    setTimeout(() => { el.style.transition = ''; }, 300);
-
-    if (getSettings().showToasts !== false) toast('Avatar reset');
-    vibrate([40, 40, 40]);
+    render(el, { x: 0, y: 0, scale: 1, rotation: 0 });
+    readAvatar(el);
+    if (getSettings().showToasts) toast('Avatar fitted to screen');
 }
-
-// Called when a new avatar is mounted.  Applies the saved transform (or the
-// default centered one) so the very first frame the user sees is already in
-// the correct position.
 export function restoreAvatar(el) {
-    if (!el) return;
-    const saved = loadPosition(el);
-
-    if (saved) {
-        const vw = window.innerWidth || 800;
-        const vh = window.innerHeight || 600;
-        const maxX = vw * 0.45;
-        const maxY = vh * 0.45;
-        dragState.x = clamp(saved.x ?? 0, -maxX, maxX);
-        dragState.y = clamp(saved.y ?? 0, -maxY, maxY);
-        dragState.scale = saved.scale ?? 1;
-        rotationState.rotation = saved.rotation ?? 0;
-    } else {
-        dragState.x = 0;
-        dragState.y = 0;
-        dragState.scale = 1;
-        rotationState.rotation = 0;
+    if (managed.has(el)) render(el, loadPosition(el) ?? {});
+}
+export function manageAvatar(el) {
+    if (managed.has(el)) return;
+    const properties = new Map(ownedProperties.map(key => [key,
+        { value: el.style.getPropertyValue(key), priority: el.style.getPropertyPriority(key) }]));
+    const data = new Map(Object.values(DATA_ATTRS).map(key => [key, el.dataset[key]]));
+    const onLoad = () => { if (managed.has(el)) render(el, values(el)); };
+    managed.set(el, { properties, data, onLoad });
+    el.classList.add('am-managed');
+    el.addEventListener('load', onLoad, true);
+    restoreAvatar(el);
+}
+export function releaseAvatar(el) {
+    const record = managed.get(el);
+    if (!record) return;
+    saver.flush(getAvatarKey(el));
+    el.removeEventListener('load', record.onLoad, true);
+    for (const [key, original] of record.properties) {
+        if (original.value) el.style.setProperty(key, original.value, original.priority);
+        else el.style.removeProperty(key);
     }
-
-    writeAvatar(el, { persist: false });
+    for (const [key, value] of record.data) {
+        if (value === undefined) delete el.dataset[key]; else el.dataset[key] = value;
+    }
+    el.classList.remove('am-managed', 'am-active', 'am-dragging', 'am-pinching', 'am-rotating');
+    managed.delete(el);
+}
+export function refreshAvatars() {
+    for (const el of managed.keys()) render(el, values(el));
+}
+export function cleanupAvatars() {
+    for (const el of [...managed.keys()]) releaseAvatar(el);
+    saver.flushAll();
 }

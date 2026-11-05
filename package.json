@@ -1,0 +1,13 @@
+{
+  "name": "sillytavern-avatar-manipulator",
+  "version": "2.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "node --test tests/*.test.js",
+    "test:browser": "playwright test",
+    "test:integration": "node scripts/smoke.mjs"
+  },
+  "devDependencies": { "@playwright/test": "1.63.0" }
+}
